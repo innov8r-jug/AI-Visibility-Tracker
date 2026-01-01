@@ -27,11 +27,10 @@ public class GroqService implements AIService {
 
     @Override
     public String query(String prompt, String category) throws Exception {
+
         log.info("Querying Groq API for category: {}", category);
-        log.debug("Prompt: {}", prompt);
 
         if (!isAvailable()) {
-            log.error("Groq API key not configured");
             throw new IllegalStateException("Groq API key not configured");
         }
 
@@ -47,64 +46,53 @@ public class GroqService implements AIService {
         messages.add(message);
         requestBody.add("messages", messages);
 
+        String url = aiConfig.getGroqApiUrl();
+        if (url == null || url.isEmpty()) {
+            throw new IllegalStateException("Invalid Groq API URL");
+        }
+
         Request request = new Request.Builder()
-                .url(aiConfig.getGroqApiUrl())
-                .post(RequestBody.create(gson.toJson(requestBody), MediaType.get("application/json")))
+                .url(url)
+                .post(RequestBody.create(
+                        gson.toJson(requestBody),
+                        MediaType.get("application/json")
+                ))
                 .addHeader("Authorization", "Bearer " + aiConfig.getGroqApiKey())
                 .addHeader("Content-Type", "application/json")
                 .build();
 
-        log.debug("Sending request to Groq API: {}", aiConfig.getGroqApiUrl());
-
         try (Response response = httpClient.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                String errorBody = response.body() != null ? response.body().string() : "No error body";
-                log.error("Groq API error - Code: {}, Body: {}", response.code(), errorBody);
-                throw new IOException("Groq API error - Code: " + response.code() + ", Body: " + errorBody);
-            }
 
             ResponseBody responseBody = response.body();
-            if (responseBody == null) {
-                log.error("Empty response body from Groq");
-                throw new IOException("Empty response body from Groq");
+            String responseString = responseBody != null ? responseBody.string() : null;
+
+            if (!response.isSuccessful()) {
+                log.error("Groq API error - Code: {}, Body: {}", response.code(), responseString);
+                throw new IOException("Groq API error - Code: " + response.code());
             }
 
-            String responseString = responseBody.string();
             JsonObject jsonResponse = gson.fromJson(responseString, JsonObject.class);
 
-            // Check for errors in response
             if (jsonResponse.has("error")) {
-                JsonObject error = jsonResponse.getAsJsonObject("error");
-                String errorMessage = error.has("message") ? error.get("message").getAsString() : "Unknown error";
-                log.error("Groq API error: {}", errorMessage);
-                throw new IOException("Groq API error: " + errorMessage);
+                throw new IOException(
+                        jsonResponse.getAsJsonObject("error")
+                                .get("message").getAsString()
+                );
             }
 
             JsonArray choices = jsonResponse.getAsJsonArray("choices");
-            if (choices == null || choices.size() == 0) {
-                log.error("No choices in Groq response");
+            if (choices == null || choices.isEmpty()) {
                 throw new IOException("No choices in Groq response");
             }
 
-            JsonObject choice = choices.get(0).getAsJsonObject();
-            JsonObject messageObj = choice.getAsJsonObject("message");
-            if (messageObj == null) {
-                log.error("No message in Groq choice");
-                throw new IOException("No message in Groq choice");
-            }
-
-            if (!messageObj.has("content")) {
-                log.error("No content in Groq message");
-                throw new IOException("No content in Groq message");
-            }
-
-            String responseText = messageObj.get("content").getAsString();
-            log.info("Successfully received response from Groq API (length: {} chars)", responseText.length());
-            log.debug("Groq response: {}", responseText.substring(0, Math.min(200, responseText.length())));
-
-            return responseText;
+            return choices.get(0)
+                    .getAsJsonObject()
+                    .getAsJsonObject("message")
+                    .get("content")
+                    .getAsString();
         }
     }
+
 
     @Override
     public String getModelName() {

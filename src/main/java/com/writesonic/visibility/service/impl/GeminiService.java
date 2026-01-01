@@ -22,52 +22,64 @@ public class GeminiService implements AIService {
     private final AIConfig aiConfig;
     private final OkHttpClient httpClient;
     private final Gson gson = new Gson();
-    
+
     @Override
     public String query(String prompt, String category) throws Exception {
+
         if (!isAvailable()) {
             throw new IllegalStateException("Google API key not configured");
         }
-        
+
         JsonObject requestBody = new JsonObject();
         JsonArray contents = new JsonArray();
         JsonObject content = new JsonObject();
         JsonArray parts = new JsonArray();
         JsonObject part = new JsonObject();
+
         part.addProperty("text", prompt);
         parts.add(part);
         content.add("parts", parts);
         contents.add(content);
         requestBody.add("contents", contents);
-        
-        String url = aiConfig.getGoogleApiKey() + "?key=" + aiConfig.getGoogleApiKey();
-        
+
+        String url = aiConfig.getGoogleApiUrl() + "?key=" + aiConfig.getGoogleApiKey();
+
         Request request = new Request.Builder()
                 .url(url)
-                .post(RequestBody.create(gson.toJson(requestBody), MediaType.get("application/json")))
-                .addHeader("Content-Type", "application/json")
+                .post(RequestBody.create(
+                        gson.toJson(requestBody),
+                        MediaType.get("application/json")
+                ))
                 .build();
-        
+
         try (Response response = httpClient.newCall(request).execute()) {
+
             if (!response.isSuccessful()) {
-                throw new IOException("Unexpected code: " + response);
+                throw new IOException("Unexpected code: " + response.body().string());
             }
-            
+
             JsonObject jsonResponse = gson.fromJson(response.body().string(), JsonObject.class);
             JsonArray candidates = jsonResponse.getAsJsonArray("candidates");
-            if (candidates.size() > 0) {
+
+            if (candidates != null && candidates.size() > 0) {
                 JsonObject candidate = candidates.get(0).getAsJsonObject();
                 JsonObject contentObj = candidate.getAsJsonObject("content");
                 JsonArray responseParts = contentObj.getAsJsonArray("parts");
-                if (responseParts.size() > 0) {
-                    JsonObject textPart = responseParts.get(0).getAsJsonObject();
-                    return textPart.get("text").getAsString();
+
+                if (responseParts != null && responseParts.size() > 0) {
+                    return responseParts
+                            .get(0)
+                            .getAsJsonObject()
+                            .get("text")
+                            .getAsString();
                 }
             }
+
             throw new IOException("No response from Gemini");
         }
     }
-    
+
+
     @Override
     public String getModelName() {
         return "Google Gemini";

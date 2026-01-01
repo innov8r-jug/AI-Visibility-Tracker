@@ -78,20 +78,14 @@ public class VisibilityService {
         String categoryCamelCase = CategoryUtils.toCamelCase(categoryDisplayName);
         log.debug("Converting category '{}' to camelCase: {}", categoryDisplayName, categoryCamelCase);
 
-        Category category = categoryRepository.findByName(categoryCamelCase)
-                .orElseGet(() -> {
-                    log.info("Creating new category: {} (stored as: {})", categoryDisplayName, categoryCamelCase);
-                    Category cat = new Category();
-                    cat.setName(categoryCamelCase);
-                    cat.setDescription(categoryDisplayName); // Store display name in description for reference
-                    return categoryRepository.save(cat);
-                });
+        Long categoryId = getOrCreateCategoryId(categoryCamelCase, categoryDisplayName);
+        Category category = categoryRepository.findById(categoryId)
+                .orElseThrow(() -> new IllegalStateException("Category not found for id: " + categoryId));
 
         // Get or create brands
-        List<Brand> brands = brandNames.stream()
-                .map(name -> brandRepository.findByName(name)
-                        .orElseGet(() -> {
-                            log.debug("Creating new brand: {} for category: {}", name, category.getName());
+        List<Brand> brands = brandNames.stream().map(
+                name -> brandRepository.findByNameAndCategoryId(name, categoryId)
+                        .orElseGet(() -> {log.debug("Creating new brand: {} for category_id: {}", name, categoryId);
                             Brand brand = new Brand();
                             brand.setName(name);
                             brand.setCategory(category);
@@ -101,7 +95,7 @@ public class VisibilityService {
 
         log.info("Processing {} brands for category: {}", brands.size(), category.getName());
 
-        // Get AI services - FIXED: Logic was reversed!
+        // Get AI services
         List<AIService> services;
         if (!CollectionUtils.isEmpty(selectedModels)) {
             services = aiServiceFactory.getServicesByModels(selectedModels);
@@ -232,5 +226,19 @@ public class VisibilityService {
         int end = Math.min(content.length(), index + brandName.length() + 100);
         return content.substring(start, end);
     }
+
+    public Long getOrCreateCategoryId(String categoryCamelCase, String categoryDisplayName) {
+
+        Category category = categoryRepository.findByName(categoryCamelCase)
+                .orElseGet(() -> {
+                    log.info("Creating new category: {} (stored as: {})", categoryDisplayName, categoryCamelCase);
+                    Category newCategory = new Category();
+                    newCategory.setName(categoryCamelCase);
+                    newCategory.setDescription(categoryDisplayName);
+                    return categoryRepository.save(newCategory);
+                });
+        return category.getId();
+    }
+
 }
 
