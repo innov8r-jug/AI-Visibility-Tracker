@@ -3,7 +3,9 @@ package com.writesonic.visibility.service;
 import com.writesonic.visibility.model.*;
 import com.writesonic.visibility.repository.*;
 import com.writesonic.visibility.service.dto.*;
+import com.writesonic.visibility.util.CategoryUtils;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -11,6 +13,7 @@ import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class AnalysisService {
     
     private final BrandRepository brandRepository;
@@ -21,13 +24,36 @@ public class AnalysisService {
     
     /**
      * Get dashboard data for a category
+     * @param categoryDisplayName Display name (e.g., "CRM Software") or camelCase (e.g., "crmSoftware")
      */
-    public DashboardData getDashboardData(String categoryName) {
-        Category category = categoryRepository.findByName(categoryName)
-                .orElseThrow(() -> new IllegalArgumentException("Category not found: " + categoryName));
+    public DashboardData getDashboardData(String categoryDisplayName) {
+        log.info("Fetching dashboard data for category: {}", categoryDisplayName);
+
+        // Try to find by display name first (convert to camelCase)
+        String categoryCamelCase = CategoryUtils.toCamelCase(categoryDisplayName);
+        if (categoryCamelCase == null) {
+            // If not found, assume it's already in camelCase format
+            categoryCamelCase = categoryDisplayName;
+        }
+
+        final String finalCategoryCamelCase = categoryCamelCase; // Make effectively final for lambda
+        Category category = categoryRepository.findByName(finalCategoryCamelCase)
+                .orElseThrow(() -> {
+                    log.error("Category not found: {} (searched as: {})", categoryDisplayName, finalCategoryCamelCase);
+                    return new IllegalArgumentException("Category not found: " + categoryDisplayName);
+                });
         
         List<Brand> brands = brandRepository.findByCategory(category);
         List<Prompt> prompts = promptRepository.findByCategory(category);
+
+        log.debug("Found {} brands and {} prompts for category: {}", brands.size(), prompts.size(), categoryDisplayName);
+
+        // Get only models that actually have data (from prompts) - reduces unnecessary queries
+        Set<AIModel> usedModels = prompts.stream()
+                .map(Prompt::getAiModel)
+                .collect(Collectors.toSet());
+
+        log.debug("Used AI models for category {}: {}", categoryDisplayName, usedModels);
         
         // Calculate overall metrics
         long totalPrompts = prompts.size();
@@ -35,32 +61,32 @@ public class AnalysisService {
                 .mapToLong(brand -> mentionRepository.countByBrand(brand))
                 .sum();
         
-        // Calculate per-brand metrics
+        // Calculate per-brand metrics (only for used models)
         List<BrandMetrics> brandMetricsList = brands.stream()
-                .map(brand -> calculateBrandMetrics(brand, prompts.size()))
+                .map(brand -> calculateBrandMetrics(brand, totalPrompts, usedModels))
                 .collect(Collectors.toList());
         
         // Generate leaderboard
         List<LeaderboardEntry> leaderboard = generateLeaderboard(brandMetricsList);
         
-        // Get top cited pages
-        List<TopCitedPage> topCitedPages = getTopCitedPages();
+        // Get top cited pages (only for used models)
+        List<TopCitedPage> topCitedPages = getTopCitedPages(usedModels);
         
-        // Model comparison
-        Map<String, Map<String, Double>> modelComparison = generateModelComparison(brands);
+        // Model comparison (only for used models)
+        Map<String, Map<String, Double>> modelComparison = generateModelComparison(brands, usedModels, prompts);
         
-        // Per-model leaderboards
-        Map<String, List<LeaderboardEntry>> leaderboardByModel = generatePerModelLeaderboards(brands, prompts);
+        // Per-model leaderboards (only for used models)
+        Map<String, List<LeaderboardEntry>> leaderboardByModel = generatePerModelLeaderboards(brands, prompts, usedModels);
         
-        // Per-model top cited pages
-        Map<String, List<TopCitedPage>> topCitedPagesByModel = generatePerModelTopCitedPages();
+        // Per-model top cited pages (only for used models)
+        Map<String, List<TopCitedPage>> topCitedPagesByModel = generatePerModelTopCitedPages(usedModels);
         
         return DashboardData.builder()
                 .metrics(DashboardMetrics.builder()
                         .totalPrompts(totalPrompts)
                         .brandsTracked(brands.size())
                         .totalMentions(totalMentions)
-                        .modelsUsed(getAvailableModels())
+                        .modelsUsed(usedModels.stream().map(AIModel::getCode).collect(Collectors.toList()))
                         .build())
                 .leaderboard(leaderboard)
                 .leaderboardByModel(leaderboardByModel)
@@ -74,13 +100,13 @@ public class AnalysisService {
                 .build();
     }
     
-    private BrandMetrics calculateBrandMetrics(Brand brand, long totalPrompts) {
+    private BrandMetrics calculateBrandMetrics(Brand brand, long totalPrompts, Set<AIModel> usedModels) {
         long totalMentions = mentionRepository.countByBrand(brand);
         double visibilityScore = totalPrompts > 0 ? (double) totalMentions / totalPrompts * 100 : 0;
         
-        // Calculate per-model mentions
+        // Calculate per-model mentions (only for used models)
         Map<String, Long> mentionsByModel = new HashMap<>();
-        for (AIModel model : AIModel.values()) {
+        for (AIModel model : usedModels) {
             long count = mentionRepository.countByBrandAndAiModel(brand, model);
             if (count > 0) {
                 mentionsByModel.put(model.getCode(), count);
@@ -124,10 +150,10 @@ public class AnalysisService {
                 .collect(Collectors.toList());
     }
     
-    private Map<String, List<LeaderboardEntry>> generatePerModelLeaderboards(List<Brand> brands, List<Prompt> prompts) {
+    private Map<String, List<LeaderboardEntry>> generatePerModelLeaderboards(List<Brand> brands, List<Prompt> prompts, Set<AIModel> usedModels) {
         Map<String, List<LeaderboardEntry>> result = new HashMap<>();
         
-        for (AIModel model : AIModel.values()) {
+        for (AIModel model : usedModels) { // Only iterate over used models
             List<BrandMetrics> modelMetrics = brands.stream()
                     .map(brand -> {
                         long mentions = mentionRepository.countByBrandAndAiModel(brand, model);
@@ -164,16 +190,16 @@ public class AnalysisService {
         return result;
     }
     
-    private Map<String, Map<String, Double>> generateModelComparison(List<Brand> brands) {
+    private Map<String, Map<String, Double>> generateModelComparison(List<Brand> brands, Set<AIModel> usedModels, List<Prompt> prompts) {
         Map<String, Map<String, Double>> comparison = new HashMap<>();
         
         for (Brand brand : brands) {
             Map<String, Double> modelScores = new HashMap<>();
-            List<Prompt> allPrompts = promptRepository.findAll();
             
-            for (AIModel model : AIModel.values()) {
+            // Only process models that have data
+            for (AIModel model : usedModels) {
                 long mentions = mentionRepository.countByBrandAndAiModel(brand, model);
-                long modelPrompts = allPrompts.stream()
+                long modelPrompts = prompts.stream()
                         .filter(p -> p.getAiModel() == model)
                         .count();
                 double score = modelPrompts > 0 ? (double) mentions / modelPrompts * 100 : 0;
@@ -186,22 +212,40 @@ public class AnalysisService {
         return comparison;
     }
     
-    private List<TopCitedPage> getTopCitedPages() {
-        List<Object[]> results = citationRepository.findTopCitedPages();
-        return results.stream()
+    private List<TopCitedPage> getTopCitedPages(Set<AIModel> usedModels) {
+        // Only get citations for models that have data
+        List<Object[]> allResults = new ArrayList<>();
+        for (AIModel model : usedModels) {
+            List<Object[]> modelResults = citationRepository.findTopCitedPagesByModel(model);
+            allResults.addAll(modelResults);
+        }
+
+        // Aggregate and sort by citation count
+        Map<String, TopCitedPage> aggregated = new HashMap<>();
+        for (Object[] row : allResults) {
+            String url = (String) row[0];
+            String title = (String) row[1];
+            long count = ((Number) row[2]).longValue();
+
+            aggregated.merge(url,
+                TopCitedPage.builder().url(url).title(title).citationCount(count).build(),
+                (existing, newPage) -> TopCitedPage.builder()
+                    .url(existing.getUrl())
+                    .title(existing.getTitle())
+                    .citationCount(existing.getCitationCount() + newPage.getCitationCount())
+                    .build());
+        }
+
+        return aggregated.values().stream()
+                .sorted(Comparator.comparing(TopCitedPage::getCitationCount).reversed())
                 .limit(20)
-                .map(row -> TopCitedPage.builder()
-                        .url((String) row[0])
-                        .title((String) row[1])
-                        .citationCount(((Number) row[2]).longValue())
-                        .build())
                 .collect(Collectors.toList());
     }
     
-    private Map<String, List<TopCitedPage>> generatePerModelTopCitedPages() {
+    private Map<String, List<TopCitedPage>> generatePerModelTopCitedPages(Set<AIModel> usedModels) {
         Map<String, List<TopCitedPage>> result = new HashMap<>();
         
-        for (AIModel model : AIModel.values()) {
+        for (AIModel model : usedModels) { // Only iterate over used models
             List<Object[]> modelResults = citationRepository.findTopCitedPagesByModel(model);
             List<TopCitedPage> pages = modelResults.stream()
                     .limit(10)
@@ -238,10 +282,5 @@ public class AnalysisService {
                 .build();
     }
     
-    private List<String> getAvailableModels() {
-        return Arrays.stream(AIModel.values())
-                .map(AIModel::getCode)
-                .collect(Collectors.toList());
-    }
 }
 

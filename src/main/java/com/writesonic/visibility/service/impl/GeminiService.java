@@ -40,7 +40,7 @@ public class GeminiService implements AIService {
         contents.add(content);
         requestBody.add("contents", contents);
         
-        String url = aiConfig.getGoogleApiUrl() + "?key=" + aiConfig.getGoogleApiKey();
+        String url = aiConfig.getGoogleApiKey() + "?key=" + aiConfig.getGoogleApiKey();
         
         Request request = new Request.Builder()
                 .url(url)
