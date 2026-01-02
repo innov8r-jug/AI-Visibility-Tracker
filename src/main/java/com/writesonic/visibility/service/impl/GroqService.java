@@ -27,10 +27,11 @@ public class GroqService implements AIService {
 
     @Override
     public String query(String prompt, String category) throws Exception {
-
         log.info("Querying Groq API for category: {}", category);
+        log.debug("Prompt: {}", prompt);
 
         if (!isAvailable()) {
+            log.error("Groq API key not configured");
             throw new IllegalStateException("Groq API key not configured");
         }
 
@@ -48,8 +49,11 @@ public class GroqService implements AIService {
 
         String url = aiConfig.getGroqApiUrl();
         if (url == null || url.isEmpty()) {
+            log.error("Invalid Groq API URL: {}", url);
             throw new IllegalStateException("Invalid Groq API URL");
         }
+
+        log.debug("Sending request to Groq API: {}", url);
 
         Request request = new Request.Builder()
                 .url(url)
@@ -62,34 +66,54 @@ public class GroqService implements AIService {
                 .build();
 
         try (Response response = httpClient.newCall(request).execute()) {
-
             ResponseBody responseBody = response.body();
             String responseString = responseBody != null ? responseBody.string() : null;
 
             if (!response.isSuccessful()) {
                 log.error("Groq API error - Code: {}, Body: {}", response.code(), responseString);
-                throw new IOException("Groq API error - Code: " + response.code());
+                throw new IOException("Groq API error - Code: " + response.code() + ", Body: " + responseString);
+            }
+
+            if (responseString == null || responseString.isEmpty()) {
+                log.error("Empty response body from Groq");
+                throw new IOException("Empty response body from Groq");
             }
 
             JsonObject jsonResponse = gson.fromJson(responseString, JsonObject.class);
 
             if (jsonResponse.has("error")) {
-                throw new IOException(
-                        jsonResponse.getAsJsonObject("error")
-                                .get("message").getAsString()
-                );
+                JsonObject error = jsonResponse.getAsJsonObject("error");
+                String errorMessage = error.has("message") ? error.get("message").getAsString() : "Unknown error";
+                log.error("Groq API error: {}", errorMessage);
+                throw new IOException("Groq API error: " + errorMessage);
             }
 
             JsonArray choices = jsonResponse.getAsJsonArray("choices");
             if (choices == null || choices.isEmpty()) {
+                log.error("No choices in Groq response");
                 throw new IOException("No choices in Groq response");
             }
 
-            return choices.get(0)
-                    .getAsJsonObject()
-                    .getAsJsonObject("message")
-                    .get("content")
-                    .getAsString();
+            JsonObject choice = choices.get(0).getAsJsonObject();
+            JsonObject messageObj = choice.getAsJsonObject("message");
+            if (messageObj == null) {
+                log.error("No message in Groq choice");
+                throw new IOException("No message in Groq choice");
+            }
+
+            if (!messageObj.has("content")) {
+                log.error("No content in Groq message");
+                throw new IOException("No content in Groq message");
+            }
+
+            String responseText = messageObj.get("content").getAsString();
+            log.info("Successfully received response from Groq API (length: {} chars)", responseText.length());
+            log.debug("Groq response: {}", responseText.substring(0, Math.min(200, responseText.length())));
+
+            return responseText;
+        } catch (Exception e) {
+            log.error("Exception while querying Groq API: {}", e.getMessage(), e);
+            throw e;
         }
     }
 

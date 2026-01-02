@@ -25,7 +25,6 @@ public class GeminiService implements AIService {
 
     @Override
     public String query(String prompt, String category) throws Exception {
-
         if (!isAvailable()) {
             throw new IllegalStateException("Google API key not configured");
         }
@@ -53,29 +52,49 @@ public class GeminiService implements AIService {
                 .build();
 
         try (Response response = httpClient.newCall(request).execute()) {
+            ResponseBody responseBody = response.body();
+            String responseString = responseBody != null ? responseBody.string() : null;
 
             if (!response.isSuccessful()) {
-                throw new IOException("Unexpected code: " + response.body().string());
+                throw new IOException("Gemini API error - Code: " + response.code() + ", Body: " + responseString);
             }
 
-            JsonObject jsonResponse = gson.fromJson(response.body().string(), JsonObject.class);
+            if (responseString == null || responseString.isEmpty()) {
+                throw new IOException("Empty response body from Gemini");
+            }
+
+            JsonObject jsonResponse = gson.fromJson(responseString, JsonObject.class);
+
+            if (jsonResponse.has("error")) {
+                JsonObject error = jsonResponse.getAsJsonObject("error");
+                String errorMessage = error.has("message") ? error.get("message").getAsString() : "Unknown error";
+                throw new IOException("Gemini API error: " + errorMessage);
+            }
+
             JsonArray candidates = jsonResponse.getAsJsonArray("candidates");
-
-            if (candidates != null && candidates.size() > 0) {
-                JsonObject candidate = candidates.get(0).getAsJsonObject();
-                JsonObject contentObj = candidate.getAsJsonObject("content");
-                JsonArray responseParts = contentObj.getAsJsonArray("parts");
-
-                if (responseParts != null && responseParts.size() > 0) {
-                    return responseParts
-                            .get(0)
-                            .getAsJsonObject()
-                            .get("text")
-                            .getAsString();
-                }
+            if (candidates == null || candidates.isEmpty()) {
+                throw new IOException("No candidates in Gemini response");
             }
 
-            throw new IOException("No response from Gemini");
+            JsonObject candidate = candidates.get(0).getAsJsonObject();
+            JsonObject contentObj = candidate.getAsJsonObject("content");
+            if (contentObj == null) {
+                throw new IOException("No content in Gemini candidate");
+            }
+
+            JsonArray responseParts = contentObj.getAsJsonArray("parts");
+            if (responseParts == null || responseParts.isEmpty()) {
+                throw new IOException("No parts in Gemini content");
+            }
+
+            JsonObject textPart = responseParts.get(0).getAsJsonObject();
+            if (!textPart.has("text")) {
+                throw new IOException("No text in Gemini response part");
+            }
+
+            return textPart.get("text").getAsString();
+        } catch (Exception e) {
+            throw e;
         }
     }
 
