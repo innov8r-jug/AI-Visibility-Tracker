@@ -15,6 +15,7 @@ public class DashboardMetrics {
     private Long totalPrompts;
     private Integer brandsTracked;
     private Long totalMentions;
+    private Long totalCitations;
     private List<String> modelsUsed;
 }
 

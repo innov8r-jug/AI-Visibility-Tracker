@@ -7,6 +7,7 @@ import com.writesonic.visibility.service.AIServiceFactory;
 import com.writesonic.visibility.service.AnalysisService;
 import com.writesonic.visibility.service.VisibilityService;
 import com.writesonic.visibility.service.dto.DashboardData;
+import com.writesonic.visibility.util.CategoryPrompts;
 import com.writesonic.visibility.util.CategoryUtils;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -78,24 +79,46 @@ public class VisibilityController {
             String analysisId = UUID.randomUUID().toString();
             log.info("Starting analysis with ID: {} for category: {}", analysisId, request.getCategory());
 
+            // Execute analysis in a simple background thread
+            // This allows the HTTP request to return immediately while analysis runs
+            // The analysis itself processes AI queries in parallel (multi-threaded) for better performance
+            // Frontend will poll the dashboard endpoint to check for results
+            String threadName = "analysis-" + analysisId;
+            log.info("[CONTROLLER] Starting background thread: {} for category: {}", threadName, request.getCategory());
+            log.debug("[CONTROLLER] Analysis parameters - Category: {}, Brands: {}, Models: {}", 
+                    request.getCategory(), request.getBrands(), request.getAiModels());
+            
             new Thread(() -> {
+                String bgThreadName = Thread.currentThread().getName();
                 try {
-                    log.debug("Executing analysis in background thread for category: {}", request.getCategory());
+                    log.info("[CONTROLLER] [THREAD: {}] Executing analysis in background for category: {} with brands: {}", 
+                            bgThreadName, request.getCategory(), request.getBrands());
+                    log.debug("[CONTROLLER] [THREAD: {}] Calling visibilityService.analyzeVisibility()...", bgThreadName);
+                    
+                    long analysisStartTime = System.currentTimeMillis();
                     visibilityService.analyzeVisibility(
                             request.getCategory(),
                             request.getBrands(),
                             request.getAiModelsAsEnum()
                     );
-                    log.info("Analysis completed successfully for category: {}", request.getCategory());
+                    long analysisTime = System.currentTimeMillis() - analysisStartTime;
+                    
+                    log.info("[CONTROLLER] [THREAD: {}] ✓ Analysis completed successfully for category: {} (took {} ms)", 
+                            bgThreadName, request.getCategory(), analysisTime);
                 } catch (Exception e) {
-                    log.error("Error during analysis execution for category: {}", request.getCategory(), e);
+                    log.error("[CONTROLLER] [THREAD: {}] ✗ Error during analysis execution for category: {}", 
+                            bgThreadName, request.getCategory(), e);
                 }
-            }).start();
+            }, threadName).start();
+            
+            log.debug("[CONTROLLER] Background thread started, returning HTTP response immediately");
 
+            // Return immediately - analysis is running in background
+            // Frontend will poll /dashboard endpoint to get results
             return ResponseEntity.ok(VisibilityResponse.builder()
                     .analysisId(analysisId)
                     .status("processing")
-                    .message("Analysis started")
+                    .message("Analysis started. Results will be available shortly.")
                     .build());
         } catch (Exception e) {
             log.error("Error processing analysis request", e);
@@ -135,10 +158,12 @@ public class VisibilityController {
             result.put("category", category);
 
             if (isValid) {
-                // Get prompts
-                List<String> prompts = visibilityService.generatePrompts(category);
+                // Get prompts (without brand names for testing - just base prompts)
+                // Note: In actual analysis, prompts are enhanced with brand names
+                List<String> prompts = CategoryPrompts.getPrompts(category);
                 result.put("prompts", prompts);
                 result.put("promptCount", prompts.size());
+                result.put("note", "These are base prompts. In actual analysis, prompts are enhanced with brand names.");
 
                 // Check available services
                 List<AIService> services = aiServiceFactory.getAllServices();

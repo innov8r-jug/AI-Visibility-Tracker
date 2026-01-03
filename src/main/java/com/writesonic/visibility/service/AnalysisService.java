@@ -60,6 +60,8 @@ public class AnalysisService {
         long totalMentions = brands.stream()
                 .mapToLong(brand -> mentionRepository.countByBrand(brand))
                 .sum();
+        // Count citations for this category
+        long totalCitations = citationRepository.countByCategoryId(category.getId());
         
         // Calculate per-brand metrics (only for used models)
         List<BrandMetrics> brandMetricsList = brands.stream()
@@ -86,6 +88,7 @@ public class AnalysisService {
                         .totalPrompts(totalPrompts)
                         .brandsTracked(brands.size())
                         .totalMentions(totalMentions)
+                        .totalCitations(totalCitations)
                         .modelsUsed(usedModels.stream().map(AIModel::getCode).collect(Collectors.toList()))
                         .build())
                 .leaderboard(leaderboard)

@@ -13,8 +13,7 @@ import okhttp3.*;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
 @Service
 @RequiredArgsConstructor
@@ -25,18 +24,64 @@ public class GroqService implements AIService {
     private final OkHttpClient httpClient;
     private final Gson gson = new Gson();
 
+    /**
+     * Groq model fallback chain
+     * Order matters
+     */
+    private static final List<String> GROQ_MODELS = List.of(
+            "llama-3.3-70b-versatile",   // primary
+            "qwen/qwen3-32b",            // fallback
+            "llama-3.1-8b-instant"       // fast fallback
+    );
+
     @Override
     public String query(String prompt, String category) throws Exception {
-        log.info("Querying Groq API for category: {}", category);
-        log.debug("Prompt: {}", prompt);
+        String threadName = Thread.currentThread().getName();
+        long startTime = System.currentTimeMillis();
+
+        log.info("[GROQ] [THREAD: {}] Starting query for category: {}", threadName, category);
 
         if (!isAvailable()) {
-            log.error("Groq API key not configured");
             throw new IllegalStateException("Groq API key not configured");
         }
 
+        IOException lastException = null;
+
+        for (String model : GROQ_MODELS) {
+            log.info("[GROQ] [THREAD: {}] Trying model: {}", threadName, model);
+
+            try {
+                return executeGroqRequest(
+                        model,
+                        prompt,
+                        threadName,
+                        startTime
+                );
+            } catch (IOException e) {
+                lastException = e;
+
+                if (isModelDecommissioned(e)) {
+                    log.warn("[GROQ] [THREAD: {}] Model {} decommissioned. Falling back...",
+                            threadName, model);
+                    continue;
+                }
+
+                throw e; // non-model error → fail immediately
+            }
+        }
+
+        throw new IOException("All Groq models failed", lastException);
+    }
+
+    private String executeGroqRequest(
+            String model,
+            String prompt,
+            String threadName,
+            long startTime
+    ) throws IOException {
+
         JsonObject requestBody = new JsonObject();
-        requestBody.addProperty("model", "llama-3.1-70b-versatile");
+        requestBody.addProperty("model", model);
         requestBody.addProperty("temperature", 0.7);
         requestBody.addProperty("max_tokens", 2000);
 
@@ -47,16 +92,8 @@ public class GroqService implements AIService {
         messages.add(message);
         requestBody.add("messages", messages);
 
-        String url = aiConfig.getGroqApiUrl();
-        if (url == null || url.isEmpty()) {
-            log.error("Invalid Groq API URL: {}", url);
-            throw new IllegalStateException("Invalid Groq API URL");
-        }
-
-        log.debug("Sending request to Groq API: {}", url);
-
         Request request = new Request.Builder()
-                .url(url)
+                .url(aiConfig.getGroqApiUrl())
                 .post(RequestBody.create(
                         gson.toJson(requestBody),
                         MediaType.get("application/json")
@@ -66,57 +103,51 @@ public class GroqService implements AIService {
                 .build();
 
         try (Response response = httpClient.newCall(request).execute()) {
-            ResponseBody responseBody = response.body();
-            String responseString = responseBody != null ? responseBody.string() : null;
+
+            String responseString = response.body() != null
+                    ? response.body().string()
+                    : null;
 
             if (!response.isSuccessful()) {
-                log.error("Groq API error - Code: {}, Body: {}", response.code(), responseString);
-                throw new IOException("Groq API error - Code: " + response.code() + ", Body: " + responseString);
-            }
-
-            if (responseString == null || responseString.isEmpty()) {
-                log.error("Empty response body from Groq");
-                throw new IOException("Empty response body from Groq");
+                throw new IOException("Groq API error - Code: "
+                        + response.code() + ", Body: " + responseString);
             }
 
             JsonObject jsonResponse = gson.fromJson(responseString, JsonObject.class);
 
             if (jsonResponse.has("error")) {
-                JsonObject error = jsonResponse.getAsJsonObject("error");
-                String errorMessage = error.has("message") ? error.get("message").getAsString() : "Unknown error";
-                log.error("Groq API error: {}", errorMessage);
-                throw new IOException("Groq API error: " + errorMessage);
+                throw new IOException(jsonResponse
+                        .getAsJsonObject("error")
+                        .get("message")
+                        .getAsString());
             }
 
             JsonArray choices = jsonResponse.getAsJsonArray("choices");
             if (choices == null || choices.isEmpty()) {
-                log.error("No choices in Groq response");
                 throw new IOException("No choices in Groq response");
             }
 
-            JsonObject choice = choices.get(0).getAsJsonObject();
-            JsonObject messageObj = choice.getAsJsonObject("message");
-            if (messageObj == null) {
-                log.error("No message in Groq choice");
-                throw new IOException("No message in Groq choice");
-            }
-
-            if (!messageObj.has("content")) {
-                log.error("No content in Groq message");
-                throw new IOException("No content in Groq message");
-            }
+            JsonObject messageObj = choices
+                    .get(0)
+                    .getAsJsonObject()
+                    .getAsJsonObject("message");
 
             String responseText = messageObj.get("content").getAsString();
-            log.info("Successfully received response from Groq API (length: {} chars)", responseText.length());
-            log.debug("Groq response: {}", responseText.substring(0, Math.min(200, responseText.length())));
+
+            log.info("[GROQ] [THREAD: {}] ✓ Model {} succeeded ({} chars, {} ms)",
+                    threadName,
+                    model,
+                    responseText.length(),
+                    System.currentTimeMillis() - startTime);
 
             return responseText;
-        } catch (Exception e) {
-            log.error("Exception while querying Groq API: {}", e.getMessage(), e);
-            throw e;
         }
     }
 
+    private boolean isModelDecommissioned(IOException e) {
+        return e.getMessage() != null &&
+                e.getMessage().toLowerCase().contains("decommissioned");
+    }
 
     @Override
     public String getModelName() {
@@ -133,11 +164,54 @@ public class GroqService implements AIService {
         return aiConfig.getGroqApiKey() != null && !aiConfig.getGroqApiKey().isEmpty();
     }
 
+    /**
+     * Extract citations (URLs) from Groq response text
+     */
     @Override
     public List<Citation> extractCitations(String response) {
         List<Citation> citations = new ArrayList<>();
-        // TODO: Implement citation extraction from Groq response
+
+        if (response == null || response.isEmpty()) {
+            return citations;
+        }
+
+        String urlPattern = "(?i)\\b(https?://[^\\s<>\"'{}|\\\\^`\\[\\]]+)|(www\\.[^\\s<>\"'{}|\\\\^`\\[\\]]+)";
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(urlPattern);
+        java.util.regex.Matcher matcher = pattern.matcher(response);
+
+        Set<String> foundUrls = new HashSet<>();
+
+        while (matcher.find()) {
+            String url = matcher.group(0).replaceAll("[.,;:!?]+$", "");
+
+            if (url.startsWith("www.")) {
+                url = "https://" + url;
+            }
+
+            if (!foundUrls.add(url)) continue;
+
+            try {
+                new java.net.URL(url);
+            } catch (Exception e) {
+                continue;
+            }
+
+            Citation citation = new Citation();
+            citation.setSourceUrl(url);
+            citation.setSourceTitle(extractDomainName(url));
+            citations.add(citation);
+        }
+
         return citations;
     }
-}
 
+    private String extractDomainName(String url) {
+        try {
+            java.net.URL u = new java.net.URL(url);
+            String host = u.getHost();
+            return host.startsWith("www.") ? host.substring(4) : host;
+        } catch (Exception e) {
+            return url;
+        }
+    }
+}
