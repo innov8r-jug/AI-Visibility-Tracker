@@ -24,14 +24,10 @@ public class GroqService implements AIService {
     private final OkHttpClient httpClient;
     private final Gson gson = new Gson();
 
-    /**
-     * Groq model fallback chain
-     * Order matters
-     */
     private static final List<String> GROQ_MODELS = List.of(
-            "llama-3.3-70b-versatile",   // primary
-            "qwen/qwen3-32b",            // fallback
-            "llama-3.1-8b-instant"       // fast fallback
+            "llama-3.3-70b-versatile",
+            "qwen/qwen3-32b",
+            "llama-3.1-8b-instant"
     );
 
     @Override
@@ -66,7 +62,7 @@ public class GroqService implements AIService {
                     continue;
                 }
 
-                throw e; // non-model error → fail immediately
+                throw e;
             }
         }
 
@@ -164,9 +160,6 @@ public class GroqService implements AIService {
         return aiConfig.getGroqApiKey() != null && !aiConfig.getGroqApiKey().isEmpty();
     }
 
-    /**
-     * Extract citations (URLs) from Groq response text
-     */
     @Override
     public List<Citation> extractCitations(String response) {
         List<Citation> citations = new ArrayList<>();

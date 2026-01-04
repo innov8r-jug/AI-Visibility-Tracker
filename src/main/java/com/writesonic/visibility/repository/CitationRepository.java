@@ -35,9 +35,5 @@ public interface CitationRepository extends JpaRepository<Citation, Long> {
      */
     @Query("SELECT COUNT(c) FROM Citation c WHERE c.mention.brand.category.id = :categoryId")
     Long countByCategoryId(@Param("categoryId") Long categoryId);
-    
-    // Removed unused methods:
-    // - findByAiModel() - Not used anywhere in the codebase
-    // - findTopCitedPages() - Not used (we aggregate from findTopCitedPagesByModel instead)
 }
 
