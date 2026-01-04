@@ -168,9 +168,12 @@ http://localhost:8080
 
 ## 🎨 Frontend Setup (React)
 
-The frontend is maintained in a **separate repository**.
+The frontend is maintained in a separate repository:
 
-To start it locally:
+🔗 Frontend Repository:
+https://github.com/innov8r-jug/AI-Visibility-Tracker-Frontend
+
+To start the frontend locally:
 
 ```bash
 npm install
