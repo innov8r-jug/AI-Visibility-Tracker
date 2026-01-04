@@ -71,6 +71,49 @@ Make sure you have the following installed locally:
 CREATE DATABASE ai_visibility_tracker;
 ```
 
+### Category  Data Setup
+
+This project uses a predefined set of static categories.
+Each category has:
+
+name → camelCase key (unique, used internally)
+
+description → human-readable display name
+
+1. Add UNIQUE Constraint on Category Name
+
+The name column must be unique to prevent duplicate categories and to support ON CONFLICT inserts.
+
+```
+ALTER TABLE categories
+ADD CONSTRAINT unique_categories_name UNIQUE (name);
+```
+
+2. Insert Default Categories
+
+Use the following script to insert all supported categories.
+The query is idempotent and safe to run multiple times.
+
+```
+INSERT INTO categories (name, description) VALUES
+('crmSoftware', 'CRM Software'),
+('projectManagementTools', 'Project Management Tools'),
+('emailMarketingPlatforms', 'Email Marketing Platforms'),
+('ecommercePlatforms', 'E-commerce Platforms'),
+('analyticsTools', 'Analytics Tools'),
+('customerSupportSoftware', 'Customer Support Software'),
+('marketingAutomationTools', 'Marketing Automation Tools'),
+('contentManagementSystems', 'Content Management Systems'),
+('socialMediaManagement', 'Social Media Management'),
+('seoTools', 'SEO Tools'),
+('designTools', 'Design Tools'),
+('videoConferencingTools', 'Video Conferencing Tools')
+ON CONFLICT (name) DO NOTHING;
+```
+
+⚠️ Run this only once.
+If duplicates already exist, clean them before adding the constraint.
+
 3. Ensure your PostgreSQL credentials match the values in `application.properties`
 
 ---
