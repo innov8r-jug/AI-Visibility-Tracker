@@ -10,7 +10,7 @@ import org.springframework.web.bind.annotation.*;
 @RequiredArgsConstructor
 @CrossOrigin(origins = "*")
 public class CategoryController {
-
+    
     @GetMapping
     public ResponseEntity<String[]> getAllCategories() {
         return ResponseEntity.ok(CategoryUtils.getAvailableCategories());

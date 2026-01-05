@@ -14,10 +14,14 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Service
@@ -64,6 +68,12 @@ public class VisibilityService {
                             "\n- Mention whether it appears prominently in AI-generated answers" +
                             "\n- Include the official website URL (full https:// link)" +
                             "\n- Include 1–2 authoritative third-party pages (reviews, comparisons, directories)" +
+                            "\n- Keep the brand name in bold markdown (**Brand Name**)" +
+
+                            "\n\nAdditionally, identify 3–7 notable competitors NOT in the provided list (relevant to this category)." +
+                            "\nFor each competitor, follow the same bullet structure with official URL and 1–2 authoritative third-party sources." +
+                            "\nOnly include real brands; skip anything uncertain or generic." +
+
                             "\n\nRules:" +
                             "\n- Always include FULL URLs (https://...)" +
                             "\n- Do NOT invent sources" +
@@ -176,8 +186,17 @@ public class VisibilityService {
                 });
         log.debug("[ANALYSIS] [THREAD: {}] ✓ Category loaded: {}", threadName, category.getName());
 
-        List<Brand> brands = brandNames.stream().map(
-                name -> brandRepository.findByNameAndCategoryId(name, categoryId)
+        // Normalize and de-duplicate incoming brand names (case-insensitive)
+        Set<String> normalizedInputBrands = new LinkedHashSet<>();
+        for (String raw : brandNames) {
+            String normalized = normalizeBrandName(raw);
+            if (normalized != null && !normalized.isEmpty()) {
+                normalizedInputBrands.add(normalized);
+            }
+        }
+
+        List<Brand> brands = normalizedInputBrands.stream()
+                .map(name -> brandRepository.findByNameIgnoreCaseAndCategoryId(name, categoryId)
                         .orElseGet(() -> {
                             Brand brand = new Brand();
                             brand.setName(name);
@@ -342,6 +361,51 @@ public class VisibilityService {
         log.info("[SAVE] [THREAD: {}] ✓ Saved prompt with ID: {} for model: {} (response length: {} chars)",
                 threadName, prompt.getId(), modelName, response.getContent().length());
 
+        // Step 1.5: Discover and persist competitor brands from the AI response
+        Set<String> existingBrandNames = brands.stream()
+                .map(b -> b.getName().toLowerCase())
+                .collect(Collectors.toSet());
+
+        List<String> discoveredBrandNames = extractCompetitorBrands(response.getContent(), category.getName(), existingBrandNames);
+        if (!discoveredBrandNames.isEmpty()) {
+            log.info("[SAVE] [THREAD: {}] Discovered {} competitor brand(s) in response: {}", 
+                    threadName, discoveredBrandNames.size(), discoveredBrandNames);
+
+            List<Brand> discoveredBrands = new ArrayList<>();
+            for (String name : discoveredBrandNames) {
+                String normalized = normalizeBrandName(name);
+                if (normalized == null || normalized.isEmpty()) {
+                    continue;
+                }
+
+                Brand brand = brandRepository.findByNameIgnoreCaseAndCategoryId(normalized, category.getId())
+                        .orElseGet(() -> {
+                            Brand newBrand = new Brand();
+                            newBrand.setName(normalized);
+                            newBrand.setCategory(category);
+                            try {
+                                return brandRepository.save(newBrand);
+                            } catch (org.springframework.dao.DataIntegrityViolationException e) {
+                                // Another thread may have created it concurrently; try to fetch
+                                return brandRepository.findByNameIgnoreCaseAndCategoryId(normalized, category.getId())
+                                        .orElse(null);
+                            }
+                        });
+
+                if (brand != null) {
+                    discoveredBrands.add(brand);
+                    existingBrandNames.add(brand.getName().toLowerCase());
+                }
+            }
+
+            if (!discoveredBrands.isEmpty()) {
+                // Merge discovered brands into the working list for mention extraction
+                List<Brand> merged = new ArrayList<>(brands);
+                merged.addAll(discoveredBrands);
+                brands = merged;
+            }
+        }
+
         String content = response.getContent().toLowerCase();
         int mentionCount = 0;
         List<String> mentionedBrands = new ArrayList<>();
@@ -384,6 +448,202 @@ public class VisibilityService {
         }
     }
     
+    /**
+     * Extract competitor brand names from an AI response.
+     * Uses structural patterns (bold, bullets, numbered, colon headings) and
+     * filters false positives.
+     */
+    private List<String> extractCompetitorBrands(String responseContent, String categoryName, Set<String> existingBrandNames) {
+        if (responseContent == null || responseContent.isEmpty()) {
+            return new ArrayList<>();
+        }
+
+        Set<String> discovered = new LinkedHashSet<>();
+
+        // Pattern 1: Markdown bold **Brand**
+        Matcher boldMatcher = Pattern.compile("\\*\\*([^*]+)\\*\\*").matcher(responseContent);
+        while (boldMatcher.find()) {
+            String candidate = boldMatcher.group(1).trim();
+            if (isValidBrandName(candidate, existingBrandNames)) {
+                discovered.add(candidate);
+            }
+        }
+
+        // Pattern 2: Bullets
+        Matcher bulletMatcher = Pattern.compile("^[\\s]*[-•*]\\s+([A-Z][A-Za-z0-9\\s&.'-]{1,60}?)(?::|\\s|$)", Pattern.MULTILINE)
+                .matcher(responseContent);
+        while (bulletMatcher.find()) {
+            String candidate = bulletMatcher.group(1).trim();
+            if (isValidBrandName(candidate, existingBrandNames)) {
+                discovered.add(candidate);
+            }
+        }
+
+        // Pattern 3: Numbered list
+        Matcher numberedMatcher = Pattern.compile("^[\\s]*\\d+[.)]\\s+([A-Z][A-Za-z0-9\\s&.'-]{1,60}?)(?::|\\s|$)", Pattern.MULTILINE)
+                .matcher(responseContent);
+        while (numberedMatcher.find()) {
+            String candidate = numberedMatcher.group(1).trim();
+            if (isValidBrandName(candidate, existingBrandNames)) {
+                discovered.add(candidate);
+            }
+        }
+
+        // Pattern 4: Heading with colon
+        Matcher colonMatcher = Pattern.compile("^([A-Z][A-Za-z0-9\\s&.'-]{2,60}?):", Pattern.MULTILINE)
+                .matcher(responseContent);
+        while (colonMatcher.find()) {
+            String candidate = colonMatcher.group(1).trim();
+            if (isValidBrandName(candidate, existingBrandNames)) {
+                discovered.add(candidate);
+            }
+        }
+
+        log.debug("Extracted {} competitor brand candidates (pre-filter)", discovered.size());
+
+        return discovered.stream()
+                .map(String::trim)
+                .filter(name -> !isFalsePositive(name))
+                .collect(Collectors.toList());
+    }
+
+    /** Normalize brand name to Title Case (simple) */
+    private String normalizeBrandName(String raw) {
+        if (raw == null) return null;
+        String trimmed = raw.trim();
+        if (trimmed.isEmpty()) return "";
+
+        String[] parts = trimmed.split("\\s+");
+        StringBuilder sb = new StringBuilder();
+        for (String part : parts) {
+            if (part.isEmpty()) continue;
+            if (part.length() == 1) {
+                sb.append(part.toUpperCase());
+            } else {
+                sb.append(Character.toUpperCase(part.charAt(0)))
+                  .append(part.substring(1).toLowerCase());
+            }
+            sb.append(' ');
+        }
+        return sb.toString().trim();
+    }
+
+    private boolean isValidBrandName(String name, Set<String> existingBrandNames) {
+        if (name == null) return false;
+        String normalized = name.trim();
+        if (normalized.length() < 2 || normalized.length() > 60) return false;
+        if (!Character.isLetter(normalized.charAt(0))) return false;
+        if (!normalized.matches(".*[A-Za-z].*")) return false;
+
+        if (isFalsePositive(normalized)) return false;
+        if (existingBrandNames.contains(normalized.toLowerCase())) return false;
+
+        return true;
+    }
+
+    private boolean isFalsePositive(String name) {
+        String lower = name.toLowerCase().trim();
+
+        // AI model names / platforms
+        String[] aiModels = {
+                "gemini", "groq", "gpt", "claude", "perplexity", "openai", "anthropic",
+                "google gemini", "google", "open ai", "chatgpt", "chat gpt"
+        };
+        for (String model : aiModels) {
+            if (lower.equals(model) || lower.startsWith(model + " ") || lower.endsWith(" " + model)) {
+                return true;
+            }
+        }
+
+        String[] exactFalsePositives = {
+                "official website", "website", "url", "link", "source", "reference",
+                "authoritative", "third-party", "review", "comparison", "directory",
+                "example", "note", "important", "please", "rules", "format",
+                "brand name", "brand", "category", "tools", "software", "platform",
+                "service", "solution", "product", "company", "organization",
+                "best", "top", "popular", "leading", "major", "key", "main",
+                "features", "benefits", "advantages", "disadvantages", "pros", "cons",
+                "pricing", "cost", "free", "paid", "trial", "demo", "support",
+                "documentation", "help", "guide", "tutorial", "faq", "about",
+                "appears", "while", "prominence", "visibility", "search", "ai",
+                "ai-generated", "ai-generated answers", "ai prominence", "ai search visibility",
+                "generated", "answers", "answer", "question", "query", "prompt",
+                "response", "content", "text", "data", "information", "details"
+        };
+        for (String fp : exactFalsePositives) {
+            if (lower.equals(fp)) {
+                return true;
+            }
+        }
+
+        String[] containsFalsePositives = {
+                "official website", "website url", "click here", "learn more",
+                "read more", "see also", "for more", "additional information",
+                "ai-generated", "ai search", "ai prominence", "search visibility",
+                "appears in", "appears to", "while the", "while it", "while you",
+                "prominence in", "visibility of", "search for", "ai model",
+                "generated answer", "generated content", "answer to", "answer is"
+        };
+        for (String fp : containsFalsePositives) {
+            if (lower.contains(fp)) {
+                return true;
+            }
+        }
+
+        // Too many common words
+        String[] commonWords = {
+                "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
+                "of", "with", "by", "from", "as", "is", "are", "was", "were",
+                "this", "that", "these", "those", "what", "which", "who", "when",
+                "where", "why", "how", "all", "each", "every", "some", "many",
+                "more", "most", "other", "another", "such", "only", "just", "also",
+                "very", "much", "well", "good", "best", "better", "great", "excellent"
+        };
+        String[] words = lower.split("\\s+");
+        int commonCount = 0;
+        for (String w : words) {
+            for (String c : commonWords) {
+                if (w.equals(c)) {
+                    commonCount++;
+                    break;
+                }
+            }
+        }
+        if (words.length > 1 && commonCount > words.length / 2) {
+            return true;
+        }
+        if (words.length == 1) {
+            for (String c : commonWords) {
+                if (lower.equals(c)) {
+                    return true;
+                }
+            }
+        }
+
+        // Numbers / symbols only
+        if (name.matches("^\\d+$")) return true;
+        if (name.matches("^[^A-Za-z0-9]+$")) return true;
+
+        // Avoid sentence fragments starting with lowercase for multi-word
+        if (words.length > 1 && Character.isLowerCase(name.charAt(0))) {
+            return true;
+        }
+
+        String[] verbs = {
+                "appears", "appear", "appearing", "while", "when", "where", "what",
+                "which", "who", "how", "why", "is", "are", "was", "were", "be",
+                "been", "being", "have", "has", "had", "do", "does", "did", "will",
+                "would", "could", "should", "may", "might", "must", "can"
+        };
+        for (String v : verbs) {
+            if (lower.equals(v) || lower.startsWith(v + " ") || lower.endsWith(" " + v)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private String extractContext(String content, String brandName) {
         int index = content.indexOf(brandName);
         if (index == -1) {

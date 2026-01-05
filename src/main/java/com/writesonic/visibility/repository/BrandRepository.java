@@ -13,6 +13,7 @@ public interface BrandRepository extends JpaRepository<Brand, Long> {
     Optional<Brand> findByName(String name);
     List<Brand> findByCategory(Category category);
     Optional<Brand> findByNameAndCategoryId(String name, Long categoryId);
+    Optional<Brand> findByNameIgnoreCaseAndCategoryId(String name, Long categoryId);
 
 }
 

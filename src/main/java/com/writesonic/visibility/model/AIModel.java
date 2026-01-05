@@ -6,19 +6,19 @@ public enum AIModel {
     GEMINI("Gemini", "Google Gemini"),
     GROQ("Groq", "Groq AI"),
     WEB_CRAWL("WebCrawl", "Web UI Crawler"); // Not currently used
-
+    
     private final String code;
     private final String displayName;
-
+    
     AIModel(String code, String displayName) {
         this.code = code;
         this.displayName = displayName;
     }
-
+    
     public String getCode() {
         return code;
     }
-
+    
     public String getDisplayName() {
         return displayName;
     }
