@@ -14,22 +14,22 @@ public interface AIService {
      * @throws Exception If the query fails
      */
     String query(String prompt, String category) throws Exception;
-    
+
     /**
      * Get the model name/identifier
      */
     String getModelName();
-    
+
     /**
      * Get the model type enum
      */
     AIModel getModelType();
-    
+
     /**
      * Check if the service is available (API key configured, etc.)
      */
     boolean isAvailable();
-    
+
     /**
      * Extract citations from the AI response
      * @param response The AI response
