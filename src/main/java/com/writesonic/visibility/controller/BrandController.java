@@ -13,7 +13,6 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/brands")
 @RequiredArgsConstructor
-@CrossOrigin(origins = "*")
 public class BrandController {
     
     private final BrandRepository brandRepository;

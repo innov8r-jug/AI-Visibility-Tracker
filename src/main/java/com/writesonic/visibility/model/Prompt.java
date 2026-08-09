@@ -1,9 +1,10 @@
 package com.writesonic.visibility.model;
 
 import jakarta.persistence.*;
-import lombok.AllArgsConstructor;
-import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 import lombok.NoArgsConstructor;
+import lombok.AllArgsConstructor;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -11,37 +12,37 @@ import java.util.List;
 
 @Entity
 @Table(name = "prompts")
-@Data
+@Getter
+@Setter
 @NoArgsConstructor
 @AllArgsConstructor
 public class Prompt {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
-    
-    @ManyToOne
+
+    @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "category_id", nullable = false)
     private Category category;
-    
+
     @Column(nullable = false, columnDefinition = "TEXT")
     private String queryText;
-    
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private AIModel aiModel;
-    
+
     @Column(columnDefinition = "TEXT")
     private String response;
-    
+
     @Column(nullable = false)
     private LocalDateTime timestamp;
-    
+
     @OneToMany(mappedBy = "prompt", cascade = CascadeType.ALL)
     private List<Mention> mentions = new ArrayList<>();
-    
+
     @PrePersist
     protected void onCreate() {
         timestamp = LocalDateTime.now();
     }
 }
-

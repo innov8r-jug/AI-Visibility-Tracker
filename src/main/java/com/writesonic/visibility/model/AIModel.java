@@ -5,6 +5,8 @@ import java.util.Arrays;
 public enum AIModel {
     GEMINI("Gemini", "Google Gemini"),
     GROQ("Groq", "Groq AI"),
+    CEREBRAS("Cerebras", "Cerebras AI"),
+    COHERE("Cohere", "Cohere AI"),
     WEB_CRAWL("WebCrawl", "Web UI Crawler"); // Not currently used
     
     private final String code;
