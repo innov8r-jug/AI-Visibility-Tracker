@@ -21,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -412,10 +413,23 @@ public class DynamicVisibilityService {
         }
         brandResults.sort(Comparator.comparingDouble(BrandResult::getSharePercent).reversed());
 
+        // Interleave citations round-robin across models (one response per model) instead
+        // of appending each model's full list in sequence. Most individual citation URLs
+        // are only ever cited once, so with a tied count the subsequent sort is stable and
+        // simply preserves insertion order - appending in sequence let whichever model
+        // returned the most raw citations (e.g. Gemini's broad grounding) crowd out every
+        // other model's citations once the frontend slices to a top-N list.
+        List<List<Citation>> perResponseCitations = responses.stream()
+                .map(AIModelResponse::getCitations)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+
         Map<String, CitationAggregate> citationsByUrl = new LinkedHashMap<>();
-        for (AIModelResponse response : responses) {
-            if (response.getCitations() == null) continue;
-            for (Citation citation : response.getCitations()) {
+        int maxCitationListLength = perResponseCitations.stream().mapToInt(List::size).max().orElse(0);
+        for (int i = 0; i < maxCitationListLength; i++) {
+            for (List<Citation> citationList : perResponseCitations) {
+                if (i >= citationList.size()) continue;
+                Citation citation = citationList.get(i);
                 if (citation.getSourceUrl() == null) continue;
                 citationsByUrl.computeIfAbsent(citation.getSourceUrl(),
                         url -> new CitationAggregate(url, citation.getSourceTitle())).count++;

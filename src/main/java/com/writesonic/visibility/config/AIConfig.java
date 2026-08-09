@@ -27,5 +27,9 @@ public class AIConfig {
     private String cohereApiUrl;
     @Value("${cohere.api.model:command-r-plus}")
     private String cohereApiModel;
+    @Value("${tavily.api.key:}")
+    private String tavilyApiKey;
+    @Value("${tavily.api.url:https://api.tavily.com/search}")
+    private String tavilyApiUrl;
 }
 
