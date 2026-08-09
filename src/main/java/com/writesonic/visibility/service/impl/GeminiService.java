@@ -1,41 +1,34 @@
 package com.writesonic.visibility.service.impl;
 
-import com.google.gson.Gson;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.writesonic.visibility.config.AIConfig;
 import com.writesonic.visibility.model.AIModel;
 import com.writesonic.visibility.model.Citation;
-import com.writesonic.visibility.service.AIService;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import okhttp3.*;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
-public class GeminiService implements AIService {
-    
-    private final AIConfig aiConfig;
-    private final OkHttpClient httpClient;
-    private final Gson gson = new Gson();
+public class GeminiService extends AbstractAIService {
+
+    public GeminiService(AIConfig aiConfig, OkHttpClient httpClient) {
+        super(aiConfig, httpClient);
+    }
 
     @Override
-    public String query(String prompt, String category) throws Exception {
-        String threadName = Thread.currentThread().getName();
-        long startTime = System.currentTimeMillis();
-        
-        log.info("[GEMINI] [THREAD: {}] Starting query for category: {}", threadName, category);
-        
-        if (!isAvailable()) {
-            throw new IllegalStateException("Google API key not configured");
-        }
-
+    protected Request buildRequest(String prompt) {
         JsonObject requestBody = new JsonObject();
         JsonArray contents = new JsonArray();
         JsonObject content = new JsonObject();
@@ -48,164 +41,111 @@ public class GeminiService implements AIService {
         contents.add(content);
         requestBody.add("contents", contents);
 
+        // Grounding with Google Search: lets Gemini actually search the web while
+        // answering, and return the real pages it consulted via groundingMetadata below -
+        // this is what makes citations a genuine research trail instead of a URL the
+        // model happened to type from memory (which is all the regex fallback can offer).
+        JsonArray tools = new JsonArray();
+        JsonObject googleSearchTool = new JsonObject();
+        googleSearchTool.add("google_search", new JsonObject());
+        tools.add(googleSearchTool);
+        requestBody.add("tools", tools);
+
         String url = aiConfig.getGoogleApiUrl() + "?key=" + aiConfig.getGoogleApiKey();
-        Request request = new Request.Builder()
+        return new Request.Builder()
                 .url(url)
-                .post(RequestBody.create(
-                        gson.toJson(requestBody),
-                        MediaType.get("application/json")
-                ))
+                .post(RequestBody.create(gson.toJson(requestBody), MediaType.get("application/json")))
                 .build();
-
-        try (Response response = httpClient.newCall(request).execute()) {
-            ResponseBody responseBody = response.body();
-            String responseString = responseBody != null ? responseBody.string() : null;
-
-            if (!response.isSuccessful()) {
-                throw new IOException("Gemini API error - Code: " + response.code() + ", Body: " + responseString);
-            }
-
-            if (responseString == null || responseString.isEmpty()) {
-                throw new IOException("Empty response body from Gemini");
-            }
-
-            JsonObject jsonResponse = gson.fromJson(responseString, JsonObject.class);
-
-            if (jsonResponse.has("error")) {
-                JsonObject error = jsonResponse.getAsJsonObject("error");
-                String errorMessage = error.has("message") ? error.get("message").getAsString() : "Unknown error";
-                throw new IOException("Gemini API error: " + errorMessage);
-            }
-
-            JsonArray candidates = jsonResponse.getAsJsonArray("candidates");
-            if (candidates == null || candidates.isEmpty()) {
-                throw new IOException("No candidates in Gemini response");
-            }
-
-            JsonObject candidate = candidates.get(0).getAsJsonObject();
-            JsonObject contentObj = candidate.getAsJsonObject("content");
-            if (contentObj == null) {
-                throw new IOException("No content in Gemini candidate");
-            }
-
-            JsonArray responseParts = contentObj.getAsJsonArray("parts");
-            if (responseParts == null || responseParts.isEmpty()) {
-                throw new IOException("No parts in Gemini content");
-            }
-
-            JsonObject textPart = responseParts.get(0).getAsJsonObject();
-            if (!textPart.has("text")) {
-                throw new IOException("No text in Gemini response part");
-            }
-
-            String responseText = textPart.get("text").getAsString();
-            long totalTime = System.currentTimeMillis() - startTime;
-            log.info("[GEMINI] [THREAD: {}] ✓ Successfully received response ({} chars, took {} ms total)", 
-                    threadName, responseText.length(), totalTime);
-            
-            return responseText;
-        } catch (java.net.SocketTimeoutException e) {
-            long totalTime = System.currentTimeMillis() - startTime;
-            log.error("[GEMINI] [THREAD: {}] ✗ TIMEOUT after {} ms: {}", threadName, totalTime, e.getMessage());
-            throw e;
-        } catch (java.io.IOException e) {
-            long totalTime = System.currentTimeMillis() - startTime;
-            log.error("[GEMINI] [THREAD: {}] ✗ IO Exception after {} ms: {}", threadName, totalTime, e.getMessage());
-            throw e;
-        } catch (Exception e) {
-            long totalTime = System.currentTimeMillis() - startTime;
-            log.error("[GEMINI] [THREAD: {}] ✗ Exception after {} ms: {}", threadName, totalTime, e.getMessage(), e);
-            throw e;
-        }
     }
 
+    @Override
+    protected String parseResponseText(String rawJson) throws IOException {
+        JsonObject jsonResponse = gson.fromJson(rawJson, JsonObject.class);
+
+        if (jsonResponse.has("error")) {
+            JsonObject error = jsonResponse.getAsJsonObject("error");
+            String errorMessage = error.has("message") ? error.get("message").getAsString() : "Unknown error";
+            throw new IOException("Gemini API error: " + errorMessage);
+        }
+
+        JsonArray candidates = jsonResponse.getAsJsonArray("candidates");
+        if (candidates == null || candidates.isEmpty()) {
+            throw new IOException("No candidates in Gemini response");
+        }
+
+        JsonObject candidate = candidates.get(0).getAsJsonObject();
+        JsonObject contentObj = candidate.getAsJsonObject("content");
+        if (contentObj == null) {
+            throw new IOException("No content in Gemini candidate");
+        }
+
+        JsonArray responseParts = contentObj.getAsJsonArray("parts");
+        if (responseParts == null || responseParts.isEmpty()) {
+            throw new IOException("No parts in Gemini content");
+        }
+
+        JsonObject textPart = responseParts.get(0).getAsJsonObject();
+        if (!textPart.has("text")) {
+            throw new IOException("No text in Gemini response part");
+        }
+
+        return textPart.get("text").getAsString();
+    }
+
+    @Override
+    protected String getApiKey() {
+        return aiConfig.getGoogleApiKey();
+    }
+
+    /**
+     * Reads candidates[0].groundingMetadata.groundingChunks[].web.{uri,title} - the
+     * actual list of pages Gemini searched and consulted while forming its answer, when
+     * the google_search tool (added in buildRequest) causes a search to happen. Not
+     * every prompt triggers a search, so this can legitimately be empty; when it is, the
+     * caller falls back to scraping URLs out of the answer text.
+     */
+    @Override
+    protected List<Citation> parseGroundedCitations(String rawJson) {
+        List<Citation> citations = new ArrayList<>();
+        try {
+            JsonObject jsonResponse = gson.fromJson(rawJson, JsonObject.class);
+            JsonArray candidates = jsonResponse.getAsJsonArray("candidates");
+            if (candidates == null || candidates.isEmpty()) return citations;
+
+            JsonObject candidate = candidates.get(0).getAsJsonObject();
+            JsonObject groundingMetadata = candidate.getAsJsonObject("groundingMetadata");
+            if (groundingMetadata == null) return citations;
+
+            JsonArray chunks = groundingMetadata.getAsJsonArray("groundingChunks");
+            if (chunks == null) return citations;
+
+            Set<String> seenUrls = new HashSet<>();
+            for (JsonElement el : chunks) {
+                JsonObject chunk = el.getAsJsonObject();
+                JsonObject web = chunk.getAsJsonObject("web");
+                if (web == null || !web.has("uri")) continue;
+
+                String uri = web.get("uri").getAsString();
+                if (!seenUrls.add(uri)) continue;
+
+                Citation citation = new Citation();
+                citation.setSourceUrl(uri);
+                citation.setSourceTitle(web.has("title") ? web.get("title").getAsString() : null);
+                citations.add(citation);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to parse Gemini groundingMetadata - falling back to text-scraped citations", e);
+        }
+        return citations;
+    }
 
     @Override
     public String getModelName() {
         return "Google Gemini";
     }
-    
+
     @Override
     public AIModel getModelType() {
         return AIModel.GEMINI;
     }
-    
-    @Override
-    public boolean isAvailable() {
-        return aiConfig.getGoogleApiKey() != null && !aiConfig.getGoogleApiKey().isEmpty();
-    }
-    
-    @Override
-    public List<Citation> extractCitations(String response) {
-        List<Citation> citations = new ArrayList<>();
-        
-        if (response == null || response.isEmpty()) {
-            return citations;
-        }
-        
-        String urlPattern = "(?i)\\b(https?://[^\\s<>\"'{}|\\\\^`\\[\\]]+)|(www\\.[^\\s<>\"'{}|\\\\^`\\[\\]]+)";
-        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(urlPattern);
-        java.util.regex.Matcher matcher = pattern.matcher(response);
-        
-        java.util.Set<String> foundUrls = new java.util.HashSet<>();
-        
-        while (matcher.find()) {
-            String url = matcher.group(0);
-            url = url.replaceAll("[.,;:!?]+$", "");
-            
-            if (url.startsWith("www.")) {
-                url = "https://" + url;
-            }
-            
-            if (foundUrls.contains(url) || url.length() < 10) {
-                continue;
-            }
-            
-            try {
-                new java.net.URL(url);
-            } catch (java.net.MalformedURLException e) {
-                continue;
-            }
-            
-            foundUrls.add(url);
-            
-            String title = extractTitleFromMarkdown(response, url);
-            if (title == null || title.isEmpty()) {
-                title = extractDomainName(url);
-            }
-            
-            Citation citation = new Citation();
-            citation.setSourceUrl(url);
-            citation.setSourceTitle(title);
-            citations.add(citation);
-        }
-        
-        log.info("Extracted {} unique citation(s) from Gemini response", citations.size());
-        return citations;
-    }
-    
-    private String extractTitleFromMarkdown(String response, String url) {
-        String markdownPattern = "\\[([^\\]]+)\\]\\(" + java.util.regex.Pattern.quote(url) + "\\)";
-        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(markdownPattern, java.util.regex.Pattern.CASE_INSENSITIVE);
-        java.util.regex.Matcher matcher = pattern.matcher(response);
-        
-        if (matcher.find()) {
-            return matcher.group(1).trim();
-        }
-        return null;
-    }
-    
-    private String extractDomainName(String url) {
-        try {
-            java.net.URL urlObj = new java.net.URL(url);
-            String host = urlObj.getHost();
-            if (host.startsWith("www.")) {
-                host = host.substring(4);
-            }
-            return host;
-        } catch (Exception e) {
-            return url.length() > 50 ? url.substring(0, 50) + "..." : url;
-        }
-    }
 }
-

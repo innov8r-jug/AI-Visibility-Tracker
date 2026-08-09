@@ -14,7 +14,6 @@ import java.util.stream.Collectors;
 @RestController
 @RequestMapping("/api/visibility")
 @RequiredArgsConstructor
-@CrossOrigin(origins = "*")
 public class CustomPromptController {
 
     private final DynamicVisibilityService visibilityService;

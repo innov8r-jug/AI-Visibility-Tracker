@@ -22,7 +22,7 @@ public class AIModelResponse {
     private boolean success;
     private String errorMessage;
     
-    public static AIModelResponse failed(AIModel model, Exception error) {
+    public static AIModelResponse failed(AIModel model, Throwable error) {
         return AIModelResponse.builder()
                 .model(model)
                 .success(false)

@@ -1,8 +1,8 @@
 package com.writesonic.visibility.dto;
 
+import com.writesonic.visibility.service.dto.AnalysisData;
 import lombok.Builder;
 import lombok.Data;
-import java.util.Map;
 
 @Data
 @Builder
@@ -11,5 +11,5 @@ public class CustomAnalysisResult {
     private int totalModelsQueried;
     private int successfulResponses;
     private long executionTimeMs;
-    private Map<String, Object> analysisData;
+    private AnalysisData analysisData;
 }

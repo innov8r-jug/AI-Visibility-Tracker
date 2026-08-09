@@ -1,22 +1,31 @@
 package com.writesonic.visibility.service.impl;
 
 import com.google.gson.Gson;
-import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.writesonic.visibility.config.AIConfig;
 import com.writesonic.visibility.model.AIModel;
 import com.writesonic.visibility.model.Citation;
 import com.writesonic.visibility.service.AIService;
-import lombok.RequiredArgsConstructor;
+import com.writesonic.visibility.service.dto.AIQueryResult;
+import com.writesonic.visibility.service.util.CitationTextExtractor;
+import com.writesonic.visibility.service.util.OpenAiCompatibleChatClient;
 import lombok.extern.slf4j.Slf4j;
-import okhttp3.*;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
-import java.util.*;
+import java.util.List;
 
+/**
+ * Does NOT extend AbstractAIService: unlike the other providers, Groq needs a
+ * multi-model fallback retry loop (some free-tier models get decommissioned without
+ * notice) - a genuinely different control flow, not just a different request/response
+ * shape. It still reuses the shared OpenAiCompatibleChatClient protocol helpers and
+ * CitationTextExtractor rather than duplicating that logic.
+ */
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class GroqService implements AIService {
 
@@ -30,8 +39,13 @@ public class GroqService implements AIService {
             "llama-3.1-8b-instant"
     );
 
+    public GroqService(AIConfig aiConfig, OkHttpClient httpClient) {
+        this.aiConfig = aiConfig;
+        this.httpClient = httpClient;
+    }
+
     @Override
-    public String query(String prompt, String category) throws Exception {
+    public AIQueryResult query(String prompt, String category) throws Exception {
         String threadName = Thread.currentThread().getName();
         long startTime = System.currentTimeMillis();
 
@@ -47,12 +61,10 @@ public class GroqService implements AIService {
             log.info("[GROQ] [THREAD: {}] Trying model: {}", threadName, model);
 
             try {
-                return executeGroqRequest(
-                        model,
-                        prompt,
-                        threadName,
-                        startTime
-                );
+                String text = executeGroqRequest(model, prompt, threadName, startTime);
+                // Groq's plain chat-completions models have no web-search/grounding
+                // capability, so there's never a real research trail to report here.
+                return AIQueryResult.builder().text(text).groundedCitations(List.of()).build();
             } catch (IOException e) {
                 lastException = e;
 
@@ -69,80 +81,31 @@ public class GroqService implements AIService {
         throw new IOException("All Groq models failed", lastException);
     }
 
-    private String executeGroqRequest(
-            String model,
-            String prompt,
-            String threadName,
-            long startTime
-    ) throws IOException {
-
-        JsonObject requestBody = new JsonObject();
-        requestBody.addProperty("model", model);
-        requestBody.addProperty("temperature", 0.7);
-        requestBody.addProperty("max_tokens", 2000);
-
-        JsonArray messages = new JsonArray();
-        JsonObject message = new JsonObject();
-        message.addProperty("role", "user");
-        message.addProperty("content", prompt);
-        messages.add(message);
-        requestBody.add("messages", messages);
-
-        Request request = new Request.Builder()
-                .url(aiConfig.getGroqApiUrl())
-                .post(RequestBody.create(
-                        gson.toJson(requestBody),
-                        MediaType.get("application/json")
-                ))
-                .addHeader("Authorization", "Bearer " + aiConfig.getGroqApiKey())
-                .addHeader("Content-Type", "application/json")
-                .build();
+    private String executeGroqRequest(String model, String prompt, String threadName, long startTime) throws IOException {
+        Request request = OpenAiCompatibleChatClient.buildRequest(aiConfig.getGroqApiUrl(), aiConfig.getGroqApiKey(), model, prompt, gson);
 
         try (Response response = httpClient.newCall(request).execute()) {
-
-            String responseString = response.body() != null
-                    ? response.body().string()
-                    : null;
+            String responseString = response.body() != null ? response.body().string() : null;
 
             if (!response.isSuccessful()) {
-                throw new IOException("Groq API error - Code: "
-                        + response.code() + ", Body: " + responseString);
+                throw new IOException("Groq API error - Code: " + response.code() + ", Body: " + responseString);
+            }
+            if (responseString == null || responseString.isEmpty()) {
+                throw new IOException("Empty response body from Groq");
             }
 
             JsonObject jsonResponse = gson.fromJson(responseString, JsonObject.class);
-
-            if (jsonResponse.has("error")) {
-                throw new IOException(jsonResponse
-                        .getAsJsonObject("error")
-                        .get("message")
-                        .getAsString());
-            }
-
-            JsonArray choices = jsonResponse.getAsJsonArray("choices");
-            if (choices == null || choices.isEmpty()) {
-                throw new IOException("No choices in Groq response");
-            }
-
-            JsonObject messageObj = choices
-                    .get(0)
-                    .getAsJsonObject()
-                    .getAsJsonObject("message");
-
-            String responseText = messageObj.get("content").getAsString();
+            String responseText = OpenAiCompatibleChatClient.extractContent(jsonResponse, "Groq");
 
             log.info("[GROQ] [THREAD: {}] ✓ Model {} succeeded ({} chars, {} ms)",
-                    threadName,
-                    model,
-                    responseText.length(),
-                    System.currentTimeMillis() - startTime);
+                    threadName, model, responseText.length(), System.currentTimeMillis() - startTime);
 
             return responseText;
         }
     }
 
     private boolean isModelDecommissioned(IOException e) {
-        return e.getMessage() != null &&
-                e.getMessage().toLowerCase().contains("decommissioned");
+        return e.getMessage() != null && e.getMessage().toLowerCase().contains("decommissioned");
     }
 
     @Override
@@ -162,49 +125,8 @@ public class GroqService implements AIService {
 
     @Override
     public List<Citation> extractCitations(String response) {
-        List<Citation> citations = new ArrayList<>();
-
-        if (response == null || response.isEmpty()) {
-            return citations;
-        }
-
-        String urlPattern = "(?i)\\b(https?://[^\\s<>\"'{}|\\\\^`\\[\\]]+)|(www\\.[^\\s<>\"'{}|\\\\^`\\[\\]]+)";
-        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(urlPattern);
-        java.util.regex.Matcher matcher = pattern.matcher(response);
-
-        Set<String> foundUrls = new HashSet<>();
-
-        while (matcher.find()) {
-            String url = matcher.group(0).replaceAll("[.,;:!?]+$", "");
-
-            if (url.startsWith("www.")) {
-                url = "https://" + url;
-            }
-
-            if (!foundUrls.add(url)) continue;
-
-            try {
-                new java.net.URL(url);
-            } catch (Exception e) {
-                continue;
-            }
-
-            Citation citation = new Citation();
-            citation.setSourceUrl(url);
-            citation.setSourceTitle(extractDomainName(url));
-            citations.add(citation);
-        }
-
+        List<Citation> citations = CitationTextExtractor.extract(response);
+        log.info("Extracted {} unique citation(s) from Groq response", citations.size());
         return citations;
-    }
-
-    private String extractDomainName(String url) {
-        try {
-            java.net.URL u = new java.net.URL(url);
-            String host = u.getHost();
-            return host.startsWith("www.") ? host.substring(4) : host;
-        } catch (Exception e) {
-            return url;
-        }
     }
 }
